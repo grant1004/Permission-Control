@@ -7,11 +7,12 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QProgressDialog
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import (Qt, QThread, pyqtSignal)
 from .edit_dialog import EditPermissionDialog
 from ..models.aws_config import AWSConfig
 from .circle_progress_dialog import CircleProgressDialog
 from .circle_progress_dialog import UploadProgressCallback
+from .blur_progress_dialog import creat_progress_dialog
 
 
 class MainWindow(QMainWindow):
@@ -19,6 +20,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Permission Control System")
         self.setGeometry(100, 100, 1000, 600)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.setup_ui()
 
         # AWS 設定
@@ -30,6 +35,12 @@ class MainWindow(QMainWindow):
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.local_json_path = os.path.join(self.base_dir, '..', 'models', 'json', 'permissions.json')
         self.load_permissions()
+        self.progress_dialog = creat_progress_dialog(self)
+
+
+        self.save_worker = SaveWorker(self)
+        self.save_worker.finished.connect(self.on_save_complete)
+        self.save_worker.error.connect(self.on_save_error)
 
     def setup_ui(self):
         # 創建中央視窗
@@ -196,69 +207,25 @@ class MainWindow(QMainWindow):
             self.save_button.setEnabled(True)
             self.cancel_button.setEnabled(True)
 
+
     def save_changes(self):
-        try:
-            # 創建進度對話框
-            progress_dialog = CircleProgressDialog(self)
-            progress_dialog.show()
+        self.progress_dialog.show()
+        self.save_worker.start()
 
-            # 設定 AWS
-            aws_config = AWSConfig()
-            session = boto3.Session(**aws_config.credentials)
-            s3_client = session.client('s3')
 
-            # 獲取當前腳本的絕對路徑
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+    def on_save_complete(self):
+        self.progress_dialog.close()
+        QMessageBox.information(self, "Save Successful",
+                                "Permissions updated locally and uploaded to AWS S3.")
+        self.edit_button.setEnabled(True)
+        self.save_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
 
-            # 構建本地 permission.json 的完整路徑
-            local_json_path = os.path.join(base_dir, '..', 'models', 'json', 'permissions.json')
+    def on_save_error(self, error_message):
+        self.progress_dialog.close()
+        QMessageBox.critical(self, "Save Error",
+                             f"An error occurred while saving: {error_message}")
 
-            # 讀取原始 JSON 文件
-            with open(local_json_path, 'r', encoding='utf-8') as file:
-                permissions = json.load(file)
-
-            progress_callback = UploadProgressCallback(progress_dialog)
-            s3_client.upload_file(
-                local_json_path,
-                aws_config.bucket,
-                'InHouseTool/backup/permissions.json',
-                Callback=progress_callback
-            )
-
-            # 更新 permissions
-            for row in range(self.table.rowCount()):
-                permission_name = self.table.item(row, 0).text()
-                default_value = self.table.item(row, 1).text() == 'True'
-                roles = self.table.item(row, 2).text().split(', ') if self.table.item(row, 2).text() else []
-                roles = [ r.replace("* ", "") for r in roles ]
-                # 更新對應的權限
-                permissions['Permissions'][permission_name] = {
-                    'AllowedRoles': roles,
-                    'DefaultValue': default_value
-
-                }
-
-            # 先本地保存
-            with open(local_json_path, 'w', encoding='utf-8') as file:
-                json.dump(permissions, file, indent=4, ensure_ascii=False)
-
-            progress_callback = UploadProgressCallback(progress_dialog)
-            s3_client.upload_file(
-                local_json_path,
-                aws_config.bucket,
-                'InHouseTool/permissions.json',
-                Callback=progress_callback
-            )
-
-            # 顯示成功消息
-            progress_dialog.close()
-            QMessageBox.information(self, "Save Successful", "Permissions updated locally and uploaded to AWS S3.")
-
-            self.edit_button.setEnabled(True)
-            self.save_button.setEnabled(False)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"An error occurred while saving: {str(e)}")
 
     def cancel_changes(self):
         # 讀取下載的 JSON 檔案
@@ -273,3 +240,57 @@ class MainWindow(QMainWindow):
         self.edit_button.setEnabled(True)
         self.save_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 通知子視窗重新調整大小
+        if self.progress_dialog:
+            self.progress_dialog.resize(self.size())  # 同步更新子視窗大小
+            self.progress_dialog.blur_container.resize(self.size())
+            print(f"Parent resized: {self.size()}")
+
+
+class SaveWorker(QThread):
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+
+    def run(self):
+        try:
+            # 讀取原始 JSON 文件
+            with open(self.main_window.local_json_path, 'r', encoding='utf-8') as file:
+                permissions = json.load(file)
+
+            self.main_window.s3_client.upload_file(
+                self.main_window.local_json_path,
+                self.main_window.aws_config.bucket,
+                'InHouseTool/backup/permissions.json'
+            )
+
+            # 更新 permissions
+            for row in range(self.main_window.table.rowCount()):
+                permission_name = self.main_window.table.item(row, 0).text()
+                default_value = self.main_window.table.item(row, 1).text() == 'True'
+                roles = self.main_window.table.item(row, 2).text().split(', ') if self.main_window.table.item(row, 2).text() else []
+                roles = [r.replace("* ", "") for r in roles]
+                permissions['Permissions'][permission_name] = {
+                    'AllowedRoles': roles,
+                    'DefaultValue': default_value
+                }
+
+            # 本地保存
+            with open(self.main_window.local_json_path, 'w', encoding='utf-8') as file:
+                json.dump(permissions, file, indent=4, ensure_ascii=False)
+
+            self.main_window.s3_client.upload_file(
+                self.main_window.local_json_path,
+                self.main_window.aws_config.bucket,
+                'InHouseTool/permissions.json'
+            )
+
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))

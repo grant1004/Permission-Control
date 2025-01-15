@@ -2,3 +2,4 @@ from .main_window import MainWindow
 from .edit_dialog import EditPermissionDialog
 from .circle_progress_dialog import UploadProgressCallback
 from .circle_progress_dialog import CircleProgressDialog
+from .blur_progress_dialog import creat_progress_dialog
