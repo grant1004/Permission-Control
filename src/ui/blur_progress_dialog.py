@@ -11,6 +11,7 @@ class BlurProgressDialog(QDialog):
                             Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
+        self.hide()
 
         # 主布局
         layout = QVBoxLayout(self)
@@ -39,7 +40,8 @@ class BlurProgressDialog(QDialog):
         progress_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # 標籤
-        self.label = QLabel("Uploading...")
+        self.title = "Uploading..."
+        self.label = QLabel(self.title)
         self.label.setStyleSheet("""
             QLabel {
                 font-size: 16px;
@@ -58,7 +60,6 @@ class BlurProgressDialog(QDialog):
         self.progress_bar.setStyleSheet("""
             QProgressBar {
                 border: none;
-                background-color: #F0F0F0;
                 border-radius: 3px;
             }
             QProgressBar::chunk {
@@ -88,8 +89,14 @@ class BlurProgressDialog(QDialog):
             # 調整霧化背景大小
             self.blur_container.resize(self.size())
 
+    def SetTitle(self, title):
+        self.title = title
+        self.label.setText(self.title)
 
-def creat_progress_dialog(parent_window):
+
+
+def creat_progress_dialog(parent_window, title = "Uploading..."):
     dialog = BlurProgressDialog(parent_window)
-    dialog.close()
+    dialog.SetTitle(title)
+    dialog.hide()
     return dialog

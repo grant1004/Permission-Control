@@ -10,20 +10,17 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (Qt, QThread, pyqtSignal)
 from .edit_dialog import EditPermissionDialog
 from ..models.aws_config import AWSConfig
-from .circle_progress_dialog import CircleProgressDialog
-from .circle_progress_dialog import UploadProgressCallback
 from .blur_progress_dialog import creat_progress_dialog
 
 
 class MainWindow(QMainWindow):
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Permission Control System")
         self.setGeometry(100, 100, 1000, 600)
         self.setContentsMargins(0, 0, 0, 0)
-        self.setWindowFlags(
-            self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
-        )
+        self.setWindowFlags( self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint )
         self.setup_ui()
 
         # AWS 設定
@@ -31,16 +28,26 @@ class MainWindow(QMainWindow):
         self.session = boto3.Session(**self.aws_config.credentials)
         self.s3_client = self.session.client('s3')
 
+        # Progress View
+        self.progress_dialog = None
+        self.uploading_progress_dialog = creat_progress_dialog(self, "Uploading to S3 ...")
+        self.load_progress_dialog = creat_progress_dialog(self, "Loading permissions.json from S3 ...")
+
+
         # download permissions.json
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.local_json_path = os.path.join(self.base_dir, '..', 'models', 'json', 'permissions.json')
-        self.load_permissions()
-        self.progress_dialog = creat_progress_dialog(self)
+        self.load_permissions_worker = LoadWorker(self)
+        self.load_permissions_worker.finished.connect(self.on_load_complete)
+        self.load_permissions_worker.error.connect(self.on_load_error)
 
-
+        #save
         self.save_worker = SaveWorker(self)
         self.save_worker.finished.connect(self.on_save_complete)
         self.save_worker.error.connect(self.on_save_error)
+
+
+        self.load_permissions()
 
     def setup_ui(self):
         # 創建中央視窗
@@ -101,40 +108,52 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(button_layout)
 
+    # region Load permission Worker : doing, finished, error
     def load_permissions(self):
+        self.show_progress(self.load_progress_dialog)
+        self.load_permissions_worker.start()
+        print( "Load permissions worker started" )
+
+    def on_load_complete(self):
+        self.hide_progress(self.load_progress_dialog)
+        # 讀取下載的 JSON 檔案
+        print( "Complete load permissions json")
         try:
-            # 顯示進度對話框
-            progress_dialog = CircleProgressDialog(self)
-            progress_dialog.show()
+            with open(self.local_json_path, 'r', encoding='utf-8') as file:
+                permissions = json.load(file)
+                self.populate_table(permissions)
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "Load Error",
+                                 f"An error occurred while Loading: Invalid JSON format: {str(e)}")
 
-            # 確保目標資料夾存在
-            os.makedirs(os.path.dirname(self.local_json_path), exist_ok=True)
+    def on_load_error(self, error_message):
+        self.hide_progress(self.load_progress_dialog)
+        QMessageBox.critical(self, "Load Error",
+                             f"An error occurred while Loading: {error_message}")
+    #========================================================================#
 
-            # 從 S3 下載檔案
-            progress_callback = UploadProgressCallback(progress_dialog)
-            try:
-                self.s3_client.download_file(
-                    self.aws_config.bucket,
-                    'InHouseTool/permissions.json',
-                    self.local_json_path,
-                    Callback=progress_callback
-                )
-            except Exception as e:
-                progress_dialog.close()
-                raise Exception(f"Failed to download from S3: {str(e)}")
 
-            # 讀取下載的 JSON 檔案
-            try:
-                with open(self.local_json_path, 'r', encoding='utf-8') as file:
-                    permissions = json.load(file)
-                    self.populate_table(permissions)
-            except json.JSONDecodeError as e:
-                raise Exception(f"Invalid JSON format: {str(e)}")
 
-            progress_dialog.close()
 
-        except Exception as e:
-            QMessageBox.critical(self, "Load Error", f"Error loading permissions: {str(e)}")
+    # region Save Worker : doing, finished, error
+    def save_changes(self):
+        self.show_progress(self.uploading_progress_dialog)
+        self.save_worker.start()
+
+    def on_save_complete(self):
+        self.hide_progress(self.uploading_progress_dialog)
+        QMessageBox.information(self, "Save Successful",
+                                "Permissions updated locally and uploaded to AWS S3.")
+        self.edit_button.setEnabled(True)
+        self.save_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+
+    def on_save_error(self, error_message):
+        self.hide_progress(self.uploading_progress_dialog)
+        QMessageBox.critical(self, "Save Error",
+                             f"An error occurred while saving: {error_message}")
+    #========================================================================#
+
 
     def populate_table(self, permissions):
         self.table.setRowCount(len(permissions['Permissions']))
@@ -208,24 +227,6 @@ class MainWindow(QMainWindow):
             self.cancel_button.setEnabled(True)
 
 
-    def save_changes(self):
-        self.progress_dialog.show()
-        self.save_worker.start()
-
-
-    def on_save_complete(self):
-        self.progress_dialog.close()
-        QMessageBox.information(self, "Save Successful",
-                                "Permissions updated locally and uploaded to AWS S3.")
-        self.edit_button.setEnabled(True)
-        self.save_button.setEnabled(False)
-        self.cancel_button.setEnabled(False)
-
-    def on_save_error(self, error_message):
-        self.progress_dialog.close()
-        QMessageBox.critical(self, "Save Error",
-                             f"An error occurred while saving: {error_message}")
-
 
     def cancel_changes(self):
         # 讀取下載的 JSON 檔案
@@ -237,9 +238,10 @@ class MainWindow(QMainWindow):
         except json.JSONDecodeError as e:
             raise Exception(f"Invalid JSON format: {str(e)}")
 
-        self.edit_button.setEnabled(True)
-        self.save_button.setEnabled(False)
+        self.edit_button.setEnabled(False)
+        self.save_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -248,6 +250,19 @@ class MainWindow(QMainWindow):
             self.progress_dialog.resize(self.size())  # 同步更新子視窗大小
             self.progress_dialog.blur_container.resize(self.size())
             print(f"Parent resized: {self.size()}")
+
+    # 显示对话框时
+    def show_progress(self, dialog):
+        if dialog:
+            dialog.show()
+            self.progress_dialog = dialog  # 更新当前活动的对话框引用
+
+    # 隐藏对话框时
+    def hide_progress(self, dialog):
+        if dialog:
+            dialog.hide()
+            if self.progress_dialog == dialog:
+                self.progress_dialog = None
 
 
 class SaveWorker(QThread):
@@ -292,5 +307,33 @@ class SaveWorker(QThread):
             )
 
             self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+class LoadWorker(QThread):
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+
+    def run(self):
+        try:
+            # 確保目標資料夾存在
+            os.makedirs(os.path.dirname(self.main_window.local_json_path), exist_ok=True)
+
+            # 從 S3 下載檔案
+            try:
+                self.main_window.s3_client.download_file(
+                    self.main_window.aws_config.bucket,
+                    'InHouseTool/permissions.json',
+                    self.main_window.local_json_path )
+                print( f"Save Permission done {self.main_window.local_json_path}")
+            except Exception as e:
+                raise Exception(f"Failed to download from S3: {str(e)}")
+
+            self.finished.emit()
+
         except Exception as e:
             self.error.emit(str(e))
